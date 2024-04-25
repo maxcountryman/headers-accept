@@ -1,0 +1,17 @@
+[package]
+name = "headers-accept"
+version = "0.1.0"
+edition = "2021"
+authors = ["Max Countryman <hello@maxcountryman.com>"]
+categories = ["network-programming", "web-programming"]
+description = "🤝 The missing `Accept` implementation for `headers::Header`"
+homepage = "https://github.com/maxcountryman/headers-accept"
+keywords = ["http", "headers", "accept", "headers-accept"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/maxcountryman/headers-accept"
+
+[dependencies]
+headers-core = "0.3.0"
+http = "1.1.0"
+mediatype = "0.19.18"
