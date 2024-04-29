@@ -1,7 +1,7 @@
 //! Provides a struct `Accept` which implements [`Header`] and owns a list of
 //! [`MediaTypeBuf`] in precedence order.
 //!
-//! See [RFC 7231, 5.3.2 Accept](https://www.rfc-editor.org/rfc/rfc7231#section-5.3.2).
+//! See [RFC 9110, 12.5.1 Accept](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
 //!
 //! # Example
 //!
