@@ -311,4 +311,39 @@ mod tests {
         );
         assert_eq!(media_types.next(), None);
     }
+
+    #[test]
+    fn variable_quality_more_specifics() {
+        let accept = Accept::from_str(
+            "text/*;q=0.3, text/plain;q=0.7, text/csv;q=0, text/plain;format=flowed, \
+             text/plain;format=fixed;q=0.4, */*;q=0.5",
+        )
+        .unwrap();
+        let mut media_types = accept.media_types();
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;format=flowed").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;format=fixed;q=0.4").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;q=0.7").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/csv;q=0").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/*;q=0.3").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("*/*;q=0.5").unwrap())
+        );
+        assert_eq!(media_types.next(), None);
+    }
 }
