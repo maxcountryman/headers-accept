@@ -1,12 +1,18 @@
 [package]
 name = "headers-accept"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Max Countryman <hello@maxcountryman.com>"]
 categories = ["network-programming", "web-programming"]
 description = "🤝 The missing `Accept` implementation for `headers::Header`"
 homepage = "https://github.com/maxcountryman/headers-accept"
-keywords = ["http", "headers", "accept", "headers-accept"]
+keywords = [
+    "http",
+    "headers",
+    "accept",
+    "headers-accept",
+    "content-negotiation",
+]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/maxcountryman/headers-accept"
