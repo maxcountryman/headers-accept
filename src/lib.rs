@@ -39,7 +39,7 @@ use std::{
 };
 
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
-use mediatype::{MediaTypeBuf, Name, ReadParams};
+use mediatype::{names, MediaTypeBuf, ReadParams};
 
 /// Parsed `Accept` header containing a sorted (per `q` parameter semantics)
 /// list of `MediaTypeBuf`.
@@ -99,9 +99,14 @@ impl Accept {
 
         // Sort media types relative to their `q` parameter.
         media_types.sort_by(|a, b| {
+            let spec_a = Self::parse_specificity(a);
+            let spec_b = Self::parse_specificity(b);
+
             let q_a = Self::parse_q_param(a);
             let q_b = Self::parse_q_param(b);
-            q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal)
+            spec_b
+                .cmp(&spec_a)
+                .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
         });
 
         Ok(Self(media_types))
@@ -109,13 +114,21 @@ impl Accept {
 
     fn parse_q_param(media_type: &MediaTypeBuf) -> f32 {
         media_type
-            .get_param(Self::q_name())
-            .and_then(|v| v.as_str().parse::<f32>().ok())
+            .get_param(names::Q)
+            .and_then(|v| v.as_str().parse().ok())
             .unwrap_or(1.0)
     }
 
-    const fn q_name<'a>() -> Name<'a> {
-        Name::new_unchecked("q")
+    fn parse_specificity(media_type: &MediaTypeBuf) -> usize {
+        let type_specificity = if media_type.ty() != "*" { 1 } else { 0 };
+        let subtype_specificity = if media_type.subty() != "*" { 1 } else { 0 };
+
+        let parameter_count = media_type
+            .params()
+            .filter(|&(name, _)| name != names::Q)
+            .count();
+
+        type_specificity + subtype_specificity + parameter_count
     }
 }
 
@@ -272,6 +285,29 @@ mod tests {
                 &MediaTypeBuf::from_str("application/xhtml+xml; message=\"Hello, world?\"")
                     .unwrap()
             )
+        );
+        assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn more_specifics() {
+        let accept = Accept::from_str("text/*, text/plain, text/plain;format=flowed, */*").unwrap();
+        let mut media_types = accept.media_types();
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;format=flowed").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/*").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("*/*").unwrap())
         );
         assert_eq!(media_types.next(), None);
     }
