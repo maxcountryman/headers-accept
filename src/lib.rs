@@ -104,34 +104,40 @@ impl Accept {
     where
         Available: IntoIterator<Item = &'a MediaType<'a>>,
     {
-        let mut best = (0.0, (0, 0), None);
+        let mut best = BestMediaType::default();
 
         available
             .into_iter()
             .enumerate()
-            .map(|(priority, available_type)| {
+            .map(|(given_priority, available_ty)| {
                 if let Some(matched_range) = self
                     .0
                     .iter()
                     .enumerate()
-                    .find(|(_, available_range)| MediaRange(available_range) == available_type)
+                    .find(|(_, available_range)| MediaRange(available_range) == available_ty)
                 {
-                    (
-                        Self::parse_q_param(matched_range.1),
-                        (matched_range.0, priority),
-                        Some(available_type),
-                    )
+                    let quality = Self::parse_q_param(matched_range.1);
+                    BestMediaType {
+                        quality,
+                        parsed_priority: matched_range.0,
+                        given_priority,
+                        ty: Some(available_ty),
+                    }
                 } else {
-                    (0.0, (0, 0), None)
+                    BestMediaType::default()
                 }
             })
-            .for_each(|(quality, priority, available_type)| {
-                if quality > best.0 || quality == best.0 && priority < best.1 {
-                    best = (quality, priority, available_type)
+            .for_each(|new_best| {
+                if new_best.quality > best.quality
+                    || new_best.quality == best.quality
+                        && (new_best.parsed_priority, new_best.given_priority)
+                            < (best.parsed_priority, best.given_priority)
+                {
+                    best = new_best
                 }
             });
 
-        best.2
+        best.ty
     }
 
     fn parse(mut s: &str) -> Result<Self, HeaderError> {
@@ -285,6 +291,14 @@ impl PartialEq<&MediaType<'_>> for MediaRange<'_> {
                         .filter(|&(name, _)| name != names::Q)
                         .collect::<BTreeMap<_, _>>())
     }
+}
+
+#[derive(Default)]
+struct BestMediaType<'ty> {
+    quality: f32,
+    parsed_priority: usize,
+    given_priority: usize,
+    ty: Option<&'ty MediaType<'ty>>,
 }
 
 #[cfg(test)]
