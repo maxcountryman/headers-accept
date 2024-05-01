@@ -232,8 +232,16 @@ impl Accept {
     }
 
     fn parse_specificity(media_type: &MediaTypeBuf) -> usize {
-        let type_specificity = if media_type.ty() != "*" { 1 } else { 0 };
-        let subtype_specificity = if media_type.subty() != "*" { 1 } else { 0 };
+        let type_specificity = if media_type.ty() != names::_STAR {
+            1
+        } else {
+            0
+        };
+        let subtype_specificity = if media_type.subty() != names::_STAR {
+            1
+        } else {
+            0
+        };
 
         let parameter_count = media_type
             .params()
