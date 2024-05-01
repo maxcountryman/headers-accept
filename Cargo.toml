@@ -1,6 +1,6 @@
 [package]
 name = "headers-accept"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Max Countryman <hello@maxcountryman.com>"]
 categories = ["network-programming", "web-programming"]
