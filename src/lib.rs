@@ -1,9 +1,9 @@
-//! Provides a struct `Accept` which implements [`Header`] and owns a list of
+//! Provides a struct [`Accept`] which implements [`Header`] and owns a list of
 //! [`MediaTypeBuf`] in precedence order.
 //!
 //! See [RFC 9110, 12.5.1 Accept](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
 //!
-//! # Example
+//! # Examples
 //!
 //! ```rust
 //! use std::str::FromStr;
@@ -22,6 +22,27 @@
 //!     Some(&MediaTypeBuf::from_str("audio/*; q=0.2").unwrap())
 //! );
 //! assert_eq!(media_types.next(), None);
+//! ```
+//!
+//! Content type negotiation is also facilitated through a method,
+//! [`negotiate`](Accept::negotiate), which allows a user agent and server to
+//! determine the best shared format.
+//!
+//! ```rust
+//! # use std::str::FromStr;
+//! # use headers_accept::Accept;
+//! # use mediatype::{names::*, values::*, MediaType, MediaTypeBuf};
+//! const TEXT_HTML: MediaType = MediaType::new(TEXT, HTML);
+//! const APPLICATION_JSON: MediaType = MediaType::new(APPLICATION, JSON);
+//!
+//! const AVAILABLE: &[MediaType] = &[TEXT_HTML, APPLICATION_JSON];
+//!
+//! let accept = Accept::from_str(
+//!     "text/html, application/xhtml+xml, application/xml;q=0.9, text/*;q=0.7, text/csv;q=0",
+//! )
+//! .unwrap();
+//!
+//! assert_eq!(accept.negotiate(AVAILABLE), Some(&TEXT_HTML));
 //! ```
 #![warn(
     clippy::all,
