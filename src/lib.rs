@@ -116,7 +116,7 @@ impl Accept {
                     .enumerate()
                     .find(|(_, available_range)| MediaRange(available_range) == available_ty)
                 {
-                    let quality = Self::parse_q_param(matched_range.1);
+                    let quality = Self::parse_q_value(matched_range.1);
                     BestMediaType {
                         quality,
                         parsed_priority: matched_range.0,
@@ -186,8 +186,8 @@ impl Accept {
             let spec_a = Self::parse_specificity(a);
             let spec_b = Self::parse_specificity(b);
 
-            let q_a = Self::parse_q_param(a);
-            let q_b = Self::parse_q_param(b);
+            let q_a = Self::parse_q_value(a);
+            let q_b = Self::parse_q_value(b);
             spec_b
                 .cmp(&spec_a)
                 .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
@@ -196,7 +196,7 @@ impl Accept {
         Ok(Self(media_types))
     }
 
-    fn parse_q_param(media_type: &MediaTypeBuf) -> f32 {
+    fn parse_q_value(media_type: &MediaTypeBuf) -> f32 {
         media_type
             .get_param(names::Q)
             .and_then(|v| v.as_str().parse().ok())
