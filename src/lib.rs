@@ -42,17 +42,24 @@ use std::{
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
 use mediatype::{names, MediaType, MediaTypeBuf, ReadParams};
 
-/// Parsed `Accept` header containing a sorted (per `q` parameter semantics)
-/// list of `MediaTypeBuf`.
+/// Represents a parsed `Accept` HTTP header.
+///
+/// This struct holds a list of `MediaTypeBuf` which are sorted based on
+/// their specificity and the value of the `q` (quality) parameter. In the
+/// absence of a `q` parameter, media types are assumed to have the highest
+/// priority. When media types have equal quality parameters, they maintain the
+/// order in which they were originally specified.
 #[derive(Debug)]
 pub struct Accept(Vec<MediaTypeBuf>);
 
 impl Accept {
-    /// Return an iterator over `MediaTypeBuf` entries.
+    /// Creates an iterator over the `MediaTypeBuf` entries in the `Accept`
+    /// header.
     ///
-    /// Items are sorted according to the value of their `q` parameter. If none
-    /// is given, the highest precedence is assumed. Items of equal
-    /// precedence retain their original ordering.
+    /// The media types are returned in the order determined by their
+    /// specificity and the value of their `q` parameter. Media types with
+    /// the same `q` value retain their initial relative ordering from the
+    /// original header.
     pub fn media_types(&self) -> impl Iterator<Item = &MediaTypeBuf> {
         self.0.iter()
     }
