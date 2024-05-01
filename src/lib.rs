@@ -1,9 +1,9 @@
-//! Provides a struct `Accept` which implements [`Header`] and owns a list of
+//! Provides a struct [`Accept`] which implements [`Header`] and owns a list of
 //! [`MediaTypeBuf`] in precedence order.
 //!
 //! See [RFC 9110, 12.5.1 Accept](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
 //!
-//! # Example
+//! # Examples
 //!
 //! ```rust
 //! use std::str::FromStr;
@@ -22,6 +22,27 @@
 //!     Some(&MediaTypeBuf::from_str("audio/*; q=0.2").unwrap())
 //! );
 //! assert_eq!(media_types.next(), None);
+//! ```
+//!
+//! Content type negotiation is also facilitated through a method,
+//! [`negotiate`](Accept::negotiate), which allows a user agent and server to
+//! determine the best shared format.
+//!
+//! ```rust
+//! # use std::str::FromStr;
+//! # use headers_accept::Accept;
+//! # use mediatype::{names::*, values::*, MediaType, MediaTypeBuf};
+//! const TEXT_HTML: MediaType = MediaType::new(TEXT, HTML);
+//! const APPLICATION_JSON: MediaType = MediaType::new(APPLICATION, JSON);
+//!
+//! const AVAILABLE: &[MediaType] = &[TEXT_HTML, APPLICATION_JSON];
+//!
+//! let accept = Accept::from_str(
+//!     "text/html, application/xhtml+xml, application/xml;q=0.9, text/*;q=0.7, text/csv;q=0",
+//! )
+//! .unwrap();
+//!
+//! assert_eq!(accept.negotiate(AVAILABLE), Some(&TEXT_HTML));
 //! ```
 #![warn(
     clippy::all,
@@ -42,17 +63,24 @@ use std::{
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
 use mediatype::{names, MediaType, MediaTypeBuf, ReadParams};
 
-/// Parsed `Accept` header containing a sorted (per `q` parameter semantics)
-/// list of `MediaTypeBuf`.
+/// Represents a parsed `Accept` HTTP header.
+///
+/// This struct holds a list of `MediaTypeBuf` which are sorted based on
+/// their specificity and the value of the `q` (quality) parameter. In the
+/// absence of a `q` parameter, media types are assumed to have the highest
+/// priority. When media types have equal quality parameters, they maintain the
+/// order in which they were originally specified.
 #[derive(Debug)]
 pub struct Accept(Vec<MediaTypeBuf>);
 
 impl Accept {
-    /// Return an iterator over `MediaTypeBuf` entries.
+    /// Creates an iterator over the `MediaTypeBuf` entries in the `Accept`
+    /// header.
     ///
-    /// Items are sorted according to the value of their `q` parameter. If none
-    /// is given, the highest precedence is assumed. Items of equal
-    /// precedence retain their original ordering.
+    /// The media types are returned in the order determined by their
+    /// specificity and the value of their `q` parameter. Media types with
+    /// the same `q` value retain their initial relative ordering from the
+    /// original header.
     pub fn media_types(&self) -> impl Iterator<Item = &MediaTypeBuf> {
         self.0.iter()
     }
@@ -104,34 +132,40 @@ impl Accept {
     where
         Available: IntoIterator<Item = &'a MediaType<'a>>,
     {
-        let mut best = (0.0, (0, 0), None);
+        let mut best = BestMediaType::default();
 
         available
             .into_iter()
             .enumerate()
-            .map(|(priority, available_type)| {
+            .map(|(given_priority, available_type)| {
                 if let Some(matched_range) = self
                     .0
                     .iter()
                     .enumerate()
-                    .find(|(_, available_range)| MediaRange(available_range) == available_type)
+                    .find(|(_, available_range)| MediaRange(available_range) == *available_type)
                 {
-                    (
-                        Self::parse_q_param(matched_range.1),
-                        (matched_range.0, priority),
-                        Some(available_type),
-                    )
+                    let quality = Self::parse_q_value(matched_range.1);
+                    BestMediaType {
+                        quality,
+                        parsed_priority: matched_range.0,
+                        given_priority,
+                        ty: Some(available_type),
+                    }
                 } else {
-                    (0.0, (0, 0), None)
+                    BestMediaType::default()
                 }
             })
-            .for_each(|(quality, priority, available_type)| {
-                if quality > best.0 || quality == best.0 && priority < best.1 {
-                    best = (quality, priority, available_type)
+            .for_each(|new_best| {
+                if new_best.quality > best.quality
+                    || new_best.quality == best.quality
+                        && (new_best.parsed_priority, new_best.given_priority)
+                            < (best.parsed_priority, best.given_priority)
+                {
+                    best = new_best
                 }
             });
 
-        best.2
+        best.ty
     }
 
     fn parse(mut s: &str) -> Result<Self, HeaderError> {
@@ -180,8 +214,8 @@ impl Accept {
             let spec_a = Self::parse_specificity(a);
             let spec_b = Self::parse_specificity(b);
 
-            let q_a = Self::parse_q_param(a);
-            let q_b = Self::parse_q_param(b);
+            let q_a = Self::parse_q_value(a);
+            let q_b = Self::parse_q_value(b);
             spec_b
                 .cmp(&spec_a)
                 .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
@@ -190,7 +224,7 @@ impl Accept {
         Ok(Self(media_types))
     }
 
-    fn parse_q_param(media_type: &MediaTypeBuf) -> f32 {
+    fn parse_q_value(media_type: &MediaTypeBuf) -> f32 {
         media_type
             .get_param(names::Q)
             .and_then(|v| v.as_str().parse().ok())
@@ -264,27 +298,45 @@ const fn is_ows(c: char) -> bool {
 
 struct MediaRange<'a>(&'a MediaTypeBuf);
 
-impl PartialEq<&MediaType<'_>> for MediaRange<'_> {
-    fn eq(&self, other: &&MediaType<'_>) -> bool {
-        self.0.ty() == names::_STAR
-            || (self.0.ty() == other.ty && self.0.subty() == names::_STAR)
-            || (self.0.ty() == other.ty
-                && self.0.subty() == other.subty
-                && self.0.suffix() == other.suffix
-                && self.0.params().count() == 0)
-            || (self.0.ty() == other.ty
-                && self.0.subty() == other.subty
-                && self.0.suffix() == other.suffix
-                && self
-                    .0
-                    .params()
-                    .filter(|&(name, _)| name != names::Q)
-                    .collect::<BTreeMap<_, _>>()
-                    == other
-                        .params()
-                        .filter(|&(name, _)| name != names::Q)
-                        .collect::<BTreeMap<_, _>>())
+impl PartialEq<MediaType<'_>> for MediaRange<'_> {
+    fn eq(&self, other: &MediaType<'_>) -> bool {
+        let (type_match, subtype_match, suffix_match) = (
+            self.0.ty() == other.ty,
+            self.0.subty() == other.subty,
+            self.0.suffix() == other.suffix,
+        );
+
+        let wildcard_type = self.0.ty() == names::_STAR;
+        let wildcard_subtype = self.0.subty() == names::_STAR && type_match;
+
+        let exact_match =
+            type_match && subtype_match && suffix_match && self.0.params().count() == 0;
+
+        let params_match = type_match && subtype_match && suffix_match && {
+            let self_params = self
+                .0
+                .params()
+                .filter(|&(name, _)| name != names::Q)
+                .collect::<BTreeMap<_, _>>();
+
+            let other_params = other
+                .params()
+                .filter(|&(name, _)| name != names::Q)
+                .collect::<BTreeMap<_, _>>();
+
+            self_params == other_params
+        };
+
+        wildcard_type || wildcard_subtype || exact_match || params_match
     }
+}
+
+#[derive(Default)]
+struct BestMediaType<'ty> {
+    quality: f32,
+    parsed_priority: usize,
+    given_priority: usize,
+    ty: Option<&'ty MediaType<'ty>>,
 }
 
 #[cfg(test)]
@@ -613,7 +665,6 @@ mod tests {
         );
         // This one is the real madness -- disregard a subtype wildcard with a lower
         // quality in favour of a full wildcard match
-        println!("C");
         assert_eq!(
             accept
                 .negotiate(&vec![
