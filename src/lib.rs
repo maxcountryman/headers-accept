@@ -34,12 +34,13 @@
 
 use std::{
     cmp::Ordering,
+    collections::BTreeMap,
     fmt::{self, Display},
     str::FromStr,
 };
 
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
-use mediatype::{names, MediaTypeBuf, ReadParams};
+use mediatype::{names, MediaType, MediaTypeBuf, ReadParams};
 
 /// Parsed `Accept` header containing a sorted (per `q` parameter semantics)
 /// list of `MediaTypeBuf`.
@@ -54,6 +55,83 @@ impl Accept {
     /// precedence retain their original ordering.
     pub fn media_types(&self) -> impl Iterator<Item = &MediaTypeBuf> {
         self.0.iter()
+    }
+
+    /// Determine the most acceptable media type from a list of media types
+    /// available from the server.
+    ///
+    /// The intent here is that the server knows what formats it is capable of
+    /// delivering, and passes that list to this method.  The `Accept`
+    /// instance knows what types the client is willing to accept, and works
+    /// through that list in order of quality until a match is found.
+    ///
+    /// If no agreement on a media type can be reached, then this method returns
+    /// `None`.
+    ///
+    /// # Tiebreaking
+    ///
+    /// Firstly, this method obeys RFC9110 s12.5.1's rules around media range
+    /// specificity:
+    ///
+    /// > Media ranges can be overridden by more specific media ranges or
+    /// > specific media types. If
+    /// > more than one media range applies to a given type, the most specific
+    /// > reference has
+    /// > precedence.
+    ///
+    /// Next, if two types in the list of acceptable types have the same quality
+    /// score, and both are in the `available` list, then the type that is
+    /// listed first in the list of acceptable types will be chosen.  For
+    /// example, if the client provides `Accept: text/html, text/plain`, and
+    /// the `available` list is `application/json, text/plain, text/html`,
+    /// then `text/html` will be chosen, as it is deemed to be the client's
+    /// preferred option, based on the order in the `Accept` header.
+    ///
+    /// Finally, the order of the types in the `available` parameter should
+    /// match the server's preference for delivery.  In the event that two
+    /// `available` types match the *same* entry in the list of acceptable
+    /// types, then the first entry in the `available` list will be chosen.
+    /// For example, if the client provides `Accept: text/html, image/*;q=0.8`,
+    /// and the `available` list is `image/png, image/gif`, then `image/png`
+    /// will be returned, because it is the first entry in the `available`
+    /// list.
+    ///
+    /// # Caveats
+    ///
+    /// Don't put wildcard types or the `q` parameter in the `available` list;
+    /// if you do, all bets are off as to what might happen.
+    pub fn negotiate<'a, Available>(&self, available: Available) -> Option<&MediaType<'a>>
+    where
+        Available: IntoIterator<Item = &'a MediaType<'a>>,
+    {
+        let mut best = (0.0, (0, 0), None);
+
+        available
+            .into_iter()
+            .enumerate()
+            .map(|(priority, available_type)| {
+                if let Some(matched_range) = self
+                    .0
+                    .iter()
+                    .enumerate()
+                    .find(|(_, available_range)| MediaRange(available_range) == available_type)
+                {
+                    (
+                        Self::parse_q_param(matched_range.1),
+                        (matched_range.0, priority),
+                        Some(available_type),
+                    )
+                } else {
+                    (0.0, (0, 0), None)
+                }
+            })
+            .for_each(|(quality, priority, available_type)| {
+                if quality > best.0 || quality == best.0 && priority < best.1 {
+                    best = (quality, priority, available_type)
+                }
+            });
+
+        best.2
     }
 
     fn parse(mut s: &str) -> Result<Self, HeaderError> {
@@ -184,6 +262,31 @@ const fn is_ows(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
+struct MediaRange<'a>(&'a MediaTypeBuf);
+
+impl PartialEq<&MediaType<'_>> for MediaRange<'_> {
+    fn eq(&self, other: &&MediaType<'_>) -> bool {
+        self.0.ty() == names::_STAR
+            || (self.0.ty() == other.ty && self.0.subty() == names::_STAR)
+            || (self.0.ty() == other.ty
+                && self.0.subty() == other.subty
+                && self.0.suffix() == other.suffix
+                && self.0.params().count() == 0)
+            || (self.0.ty() == other.ty
+                && self.0.subty() == other.subty
+                && self.0.suffix() == other.suffix
+                && self
+                    .0
+                    .params()
+                    .filter(|&(name, _)| name != names::Q)
+                    .collect::<BTreeMap<_, _>>()
+                    == other
+                        .params()
+                        .filter(|&(name, _)| name != names::Q)
+                        .collect::<BTreeMap<_, _>>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +413,215 @@ mod tests {
             Some(&MediaTypeBuf::from_str("*/*").unwrap())
         );
         assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn variable_quality_more_specifics() {
+        let accept = Accept::from_str(
+            "text/*;q=0.3, text/plain;q=0.7, text/csv;q=0, text/plain;format=flowed, \
+             text/plain;format=fixed;q=0.4, */*;q=0.5",
+        )
+        .unwrap();
+        let mut media_types = accept.media_types();
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;format=flowed").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;format=fixed;q=0.4").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/plain;q=0.7").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/csv;q=0").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/*;q=0.3").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("*/*;q=0.5").unwrap())
+        );
+        assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn negotiate() {
+        let accept = Accept::from_str(
+            "text/html, application/xhtml+xml, application/xml;q=0.9, text/*;q=0.7, text/csv;q=0",
+        )
+        .unwrap();
+
+        // Pick the only available type that's acceptable
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/html").unwrap(),
+                    MediaType::parse("application/json").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/html").unwrap()
+        );
+        // Pick the type that's first in the acceptable list
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("application/xhtml+xml").unwrap(),
+                    MediaType::parse("text/html").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/html").unwrap()
+        );
+        // Pick the only available type that's acceptable by wildcard subtype
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/plain").unwrap(),
+                    MediaType::parse("image/gif").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain").unwrap()
+        );
+        // Pick the first available type that matches the wildcard
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("image/gif").unwrap(),
+                    MediaType::parse("text/plain").unwrap(),
+                    MediaType::parse("text/troff").unwrap(),
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain").unwrap()
+        );
+        // No acceptable type
+        assert_eq!(
+            accept.negotiate(&vec![
+                MediaType::parse("image/gif").unwrap(),
+                MediaType::parse("image/png").unwrap()
+            ]),
+            None
+        );
+        // Type excluded by q=0
+        assert_eq!(
+            accept.negotiate(&vec![
+                MediaType::parse("image/gif").unwrap(),
+                MediaType::parse("text/csv").unwrap()
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn negotiate_with_full_wildcard() {
+        let accept =
+            Accept::from_str("text/html, text/*;q=0.7, */*;q=0.1, text/csv;q=0.0").unwrap();
+
+        // Pick the literal match
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/html").unwrap(),
+                    MediaType::parse("application/json").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/html").unwrap()
+        );
+        // Pick the only available type that's acceptable by wildcard subtype
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/plain").unwrap(),
+                    MediaType::parse("image/gif").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain").unwrap()
+        );
+        // Pick the server's first match of subtype wildcard
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/javascript").unwrap(),
+                    MediaType::parse("text/plain").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/javascript").unwrap()
+        );
+        // Pick the server's first match of full wildcard
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("image/gif").unwrap(),
+                    MediaType::parse("image/png").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("image/gif").unwrap()
+        );
+        // Exclude q=0 type
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/csv").unwrap(),
+                    MediaType::parse("text/javascript").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/javascript").unwrap()
+        );
+    }
+
+    #[test]
+    fn negotiate_diabolically() {
+        let accept = Accept::from_str(
+            "text/*;q=0.3, text/csv;q=0.2, text/plain;q=0.7, text/plain;format=rot13;q=0.7, \
+             text/plain;format=flowed, text/plain;format=fixed;q=0.4, */*;q=0.5",
+        )
+        .unwrap();
+
+        // Pick the highest available q
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/html").unwrap(),
+                    MediaType::parse("text/plain").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain").unwrap()
+        );
+        // Pick the more-specific match with the same quality
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/plain").unwrap(),
+                    MediaType::parse("text/plain;format=rot13").unwrap(),
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain;format=rot13").unwrap()
+        );
+        // Pick the higher-quality match, despite specificity
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/plain").unwrap(),
+                    MediaType::parse("text/plain;format=fixed").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("text/plain").unwrap()
+        );
+        // This one is the real madness -- disregard a subtype wildcard with a lower
+        // quality in favour of a full wildcard match
+        println!("C");
+        assert_eq!(
+            accept
+                .negotiate(&vec![
+                    MediaType::parse("text/html").unwrap(),
+                    MediaType::parse("image/gif").unwrap()
+                ])
+                .unwrap(),
+            &MediaType::parse("image/gif").unwrap()
+        );
     }
 }
