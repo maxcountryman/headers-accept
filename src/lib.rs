@@ -109,19 +109,19 @@ impl Accept {
         available
             .into_iter()
             .enumerate()
-            .map(|(given_priority, available_ty)| {
+            .map(|(given_priority, available_type)| {
                 if let Some(matched_range) = self
                     .0
                     .iter()
                     .enumerate()
-                    .find(|(_, available_range)| MediaRange(available_range) == available_ty)
+                    .find(|(_, available_range)| MediaRange(available_range) == *available_type)
                 {
                     let quality = Self::parse_q_value(matched_range.1);
                     BestMediaType {
                         quality,
                         parsed_priority: matched_range.0,
                         given_priority,
-                        ty: Some(available_ty),
+                        ty: Some(available_type),
                     }
                 } else {
                     BestMediaType::default()
@@ -270,26 +270,36 @@ const fn is_ows(c: char) -> bool {
 
 struct MediaRange<'a>(&'a MediaTypeBuf);
 
-impl PartialEq<&MediaType<'_>> for MediaRange<'_> {
-    fn eq(&self, other: &&MediaType<'_>) -> bool {
-        self.0.ty() == names::_STAR
-            || (self.0.ty() == other.ty && self.0.subty() == names::_STAR)
-            || (self.0.ty() == other.ty
-                && self.0.subty() == other.subty
-                && self.0.suffix() == other.suffix
-                && self.0.params().count() == 0)
-            || (self.0.ty() == other.ty
-                && self.0.subty() == other.subty
-                && self.0.suffix() == other.suffix
-                && self
-                    .0
-                    .params()
-                    .filter(|&(name, _)| name != names::Q)
-                    .collect::<BTreeMap<_, _>>()
-                    == other
-                        .params()
-                        .filter(|&(name, _)| name != names::Q)
-                        .collect::<BTreeMap<_, _>>())
+impl PartialEq<MediaType<'_>> for MediaRange<'_> {
+    fn eq(&self, other: &MediaType<'_>) -> bool {
+        let (type_match, subtype_match, suffix_match) = (
+            self.0.ty() == other.ty,
+            self.0.subty() == other.subty,
+            self.0.suffix() == other.suffix,
+        );
+
+        let wildcard_type = self.0.ty() == names::_STAR;
+        let wildcard_subtype = self.0.subty() == names::_STAR && type_match;
+
+        let exact_match =
+            type_match && subtype_match && suffix_match && self.0.params().count() == 0;
+
+        let params_match = type_match && subtype_match && suffix_match && {
+            let self_params = self
+                .0
+                .params()
+                .filter(|&(name, _)| name != names::Q)
+                .collect::<BTreeMap<_, _>>();
+
+            let other_params = other
+                .params()
+                .filter(|&(name, _)| name != names::Q)
+                .collect::<BTreeMap<_, _>>();
+
+            self_params == other_params
+        };
+
+        wildcard_type || wildcard_subtype || exact_match || params_match
     }
 }
 
