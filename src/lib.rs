@@ -644,7 +644,6 @@ mod tests {
         );
         // This one is the real madness -- disregard a subtype wildcard with a lower
         // quality in favour of a full wildcard match
-        println!("C");
         assert_eq!(
             accept
                 .negotiate(&vec![
