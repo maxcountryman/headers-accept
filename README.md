@@ -32,7 +32,7 @@ To use the crate in your project, add the following to your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-headers-accept = "0.1.2"
+headers-accept = "0.1.3"
 ```
 
 ## 🤸 Usage
