@@ -209,13 +209,14 @@ impl Accept {
             s = s[end..].trim_start_matches(',');
         }
 
-        // Sort media types relative to their `q` parameter.
+        // Sort media types relative to their specificity and `q` value.
         media_types.sort_by(|a, b| {
             let spec_a = Self::parse_specificity(a);
             let spec_b = Self::parse_specificity(b);
 
             let q_a = Self::parse_q_value(a);
             let q_b = Self::parse_q_value(b);
+
             spec_b
                 .cmp(&spec_a)
                 .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
