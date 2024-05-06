@@ -285,6 +285,15 @@ impl FromStr for Accept {
     }
 }
 
+impl TryFrom<&HeaderValue> for Accept {
+    type Error = HeaderError;
+
+    fn try_from(value: &HeaderValue) -> Result<Self, Self::Error> {
+        let s = value.to_str().map_err(|_| HeaderError::invalid())?;
+        s.parse().map_err(|_| HeaderError::invalid())
+    }
+}
+
 impl Display for Accept {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let media_types = self
@@ -682,5 +691,22 @@ mod tests {
                 .unwrap(),
             &MediaType::parse("image/gif").unwrap()
         );
+    }
+
+    #[test]
+    fn try_from_header_value() {
+        let header_value = &HeaderValue::from_static("audio/*; q=0.2, audio/basic");
+        let accept: Accept = header_value.try_into().unwrap();
+
+        let mut media_types = accept.media_types();
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("audio/basic").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("audio/*; q=0.2").unwrap())
+        );
+        assert_eq!(media_types.next(), None);
     }
 }
