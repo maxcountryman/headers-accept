@@ -722,4 +722,41 @@ mod tests {
         );
         assert_eq!(media_types.next(), None);
     }
+
+    #[test]
+    fn from_iterator() {
+        // MediaType
+        let accept = Accept::from_iter(
+            [
+                MediaType::parse("text/html").unwrap(),
+                MediaType::parse("image/gif").unwrap(),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            accept.media_types().collect::<Vec<_>>(),
+            vec![
+                MediaType::parse("text/html").unwrap(),
+                MediaType::parse("image/gif").unwrap(),
+            ]
+        );
+
+        // MediaTypeBuf
+        let accept = Accept::from_iter(
+            [
+                MediaTypeBuf::from_str("text/html").unwrap(),
+                MediaTypeBuf::from_str("image/gif").unwrap(),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            accept.media_types().collect::<Vec<_>>(),
+            vec![
+                MediaType::parse("text/html").unwrap(),
+                MediaType::parse("image/gif").unwrap(),
+            ]
+        );
+    }
 }
