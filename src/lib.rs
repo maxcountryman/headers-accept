@@ -307,6 +307,18 @@ impl Display for Accept {
     }
 }
 
+impl<'a> FromIterator<MediaType<'a>> for Accept {
+    fn from_iter<T: IntoIterator<Item = MediaType<'a>>>(iter: T) -> Self {
+        iter.into_iter().map(MediaTypeBuf::from).collect()
+    }
+}
+
+impl FromIterator<MediaTypeBuf> for Accept {
+    fn from_iter<T: IntoIterator<Item = MediaTypeBuf>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 // Copied directly from `mediatype::parse` as the module is private.
 //
 // See: https://github.com/picoHz/mediatype/blob/29921e91f7176784d4ed1fe42ca40f8a8f225941/src/parse.rs#L136-L138
