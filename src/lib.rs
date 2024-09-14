@@ -726,13 +726,10 @@ mod tests {
     #[test]
     fn from_iterator() {
         // MediaType
-        let accept = Accept::from_iter(
-            [
-                MediaType::parse("text/html").unwrap(),
-                MediaType::parse("image/gif").unwrap(),
-            ]
-            .into_iter(),
-        );
+        let accept = Accept::from_iter([
+            MediaType::parse("text/html").unwrap(),
+            MediaType::parse("image/gif").unwrap(),
+        ]);
 
         assert_eq!(
             accept.media_types().collect::<Vec<_>>(),
@@ -743,13 +740,10 @@ mod tests {
         );
 
         // MediaTypeBuf
-        let accept = Accept::from_iter(
-            [
-                MediaTypeBuf::from_str("text/html").unwrap(),
-                MediaTypeBuf::from_str("image/gif").unwrap(),
-            ]
-            .into_iter(),
-        );
+        let accept = Accept::from_iter([
+            MediaTypeBuf::from_str("text/html").unwrap(),
+            MediaTypeBuf::from_str("image/gif").unwrap(),
+        ]);
 
         assert_eq!(
             accept.media_types().collect::<Vec<_>>(),
