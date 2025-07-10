@@ -54,7 +54,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::BTreeMap,
     fmt::{self, Display},
     str::FromStr,
@@ -128,16 +128,24 @@ impl Accept {
     ///
     /// Don't put wildcard types or the `q` parameter in the `available` list;
     /// if you do, all bets are off as to what might happen.
-    pub fn negotiate<'a, Available>(&self, available: Available) -> Option<&MediaType<'a>>
+    pub fn negotiate<'a, 'mt: 'a, Available>(
+        &self,
+        available: Available,
+    ) -> Option<&'a MediaType<'mt>>
     where
-        Available: IntoIterator<Item = &'a MediaType<'a>>,
+        Available: IntoIterator<Item = &'a MediaType<'mt>>,
     {
-        let mut best = BestMediaType::default();
+        struct BestMediaType<'a, 'mt: 'a> {
+            quality: f32,
+            parsed_priority: usize,
+            given_priority: usize,
+            media_type: &'a MediaType<'mt>,
+        }
 
         available
             .into_iter()
             .enumerate()
-            .map(|(given_priority, available_type)| {
+            .filter_map(|(given_priority, available_type)| {
                 if let Some(matched_range) = self
                     .0
                     .iter()
@@ -145,27 +153,29 @@ impl Accept {
                     .find(|(_, available_range)| MediaRange(available_range) == *available_type)
                 {
                     let quality = Self::parse_q_value(matched_range.1);
-                    BestMediaType {
+                    if quality == 0.0 {
+                        return None;
+                    }
+                    Some(BestMediaType {
                         quality,
                         parsed_priority: matched_range.0,
                         given_priority,
-                        ty: Some(available_type),
-                    }
+                        media_type: available_type,
+                    })
                 } else {
-                    BestMediaType::default()
+                    None
                 }
             })
-            .for_each(|new_best| {
-                if new_best.quality > best.quality
-                    || new_best.quality == best.quality
-                        && (new_best.parsed_priority, new_best.given_priority)
-                            < (best.parsed_priority, best.given_priority)
-                {
-                    best = new_best
-                }
-            });
-
-        best.ty
+            .max_by(|a, b| {
+                a.quality
+                    .partial_cmp(&b.quality)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| {
+                        Reverse((a.parsed_priority, a.given_priority))
+                            .cmp(&Reverse((b.parsed_priority, b.given_priority)))
+                    })
+            })
+            .map(|best| best.media_type)
     }
 
     fn parse(mut s: &str) -> Result<Self, HeaderError> {
@@ -303,7 +313,7 @@ impl Display for Accept {
             .map(|mt| mt.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "{}", media_types)
+        write!(f, "{media_types}")
     }
 }
 
@@ -359,14 +369,6 @@ impl PartialEq<MediaType<'_>> for MediaRange<'_> {
 
         wildcard_type || wildcard_subtype || exact_match || params_match
     }
-}
-
-#[derive(Default)]
-struct BestMediaType<'ty> {
-    quality: f32,
-    parsed_priority: usize,
-    given_priority: usize,
-    ty: Option<&'ty MediaType<'ty>>,
 }
 
 #[cfg(test)]
@@ -721,6 +723,16 @@ mod tests {
             Some(&MediaTypeBuf::from_str("audio/*; q=0.2").unwrap())
         );
         assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn mixed_lifetime_from_iter() {
+        // this must type check
+        #[allow(unused)]
+        fn best<'a>(available: &'a [MediaType<'static>]) -> Option<&'a MediaType<'static>> {
+            let accept = Accept::from_str("*/*").unwrap();
+            accept.negotiate(available.iter())
+        }
     }
 
     #[test]
