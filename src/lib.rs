@@ -54,7 +54,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::BTreeMap,
     fmt::{self, Display},
     str::FromStr,
@@ -128,44 +128,50 @@ impl Accept {
     ///
     /// Don't put wildcard types or the `q` parameter in the `available` list;
     /// if you do, all bets are off as to what might happen.
-    pub fn negotiate<'a, Available>(&self, available: Available) -> Option<&MediaType<'a>>
+    pub fn negotiate<'a, 'mt: 'a, Available>(
+        &self,
+        available: Available,
+    ) -> Option<&'a MediaType<'mt>>
     where
-        Available: IntoIterator<Item = &'a MediaType<'a>>,
+        Available: IntoIterator<Item = &'a MediaType<'mt>>,
     {
-        let mut best = BestMediaType::default();
+        struct MediaTypeCandidate<'a, 'mt: 'a> {
+            quality: QValue,
+            parsed_priority: usize,
+            given_priority: usize,
+            media_type: &'a MediaType<'mt>,
+        }
 
+        let available_ranges = &self.0;
         available
             .into_iter()
             .enumerate()
-            .map(|(given_priority, available_type)| {
-                if let Some(matched_range) = self
-                    .0
+            .filter_map(|(given_priority, available_type)| {
+                // If the available type matches a media range in the Accept header,
+                // we can consider it for negotiation.
+                available_ranges
                     .iter()
                     .enumerate()
-                    .find(|(_, available_range)| MediaRange(available_range) == *available_type)
-                {
-                    let quality = Self::parse_q_value(matched_range.1);
-                    BestMediaType {
-                        quality,
-                        parsed_priority: matched_range.0,
+                    .find(|(_, media_range)| MediaRange(media_range) == *available_type)
+                    .map(|(parsed_priority, matched_range)| MediaTypeCandidate {
+                        quality: Self::parse_q_value(matched_range),
+                        media_type: available_type,
+                        parsed_priority,
                         given_priority,
-                        ty: Some(available_type),
-                    }
-                } else {
-                    BestMediaType::default()
-                }
+                    })
             })
-            .for_each(|new_best| {
-                if new_best.quality > best.quality
-                    || new_best.quality == best.quality
-                        && (new_best.parsed_priority, new_best.given_priority)
-                            < (best.parsed_priority, best.given_priority)
-                {
-                    best = new_best
-                }
-            });
-
-        best.ty
+            .filter(|candidate| {
+                // Filter out candidates with a quality of 0.
+                candidate.quality != QValue::Partial(0)
+            })
+            .max_by(|a, b| {
+                // Sort by quality first, then by specificity, and finally by the
+                // order in which they were given.
+                let a_key = (a.quality, Reverse((a.parsed_priority, a.given_priority)));
+                let b_key = (b.quality, Reverse((b.parsed_priority, b.given_priority)));
+                a_key.cmp(&b_key)
+            })
+            .map(|best| best.media_type)
     }
 
     fn parse(mut s: &str) -> Result<Self, HeaderError> {
@@ -210,26 +216,20 @@ impl Accept {
         }
 
         // Sort media types relative to their specificity and `q` value.
-        media_types.sort_by(|a, b| {
-            let spec_a = Self::parse_specificity(a);
-            let spec_b = Self::parse_specificity(b);
-
-            let q_a = Self::parse_q_value(a);
-            let q_b = Self::parse_q_value(b);
-
-            spec_b
-                .cmp(&spec_a)
-                .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
+        media_types.sort_by_key(|a| {
+            let spec = Self::parse_specificity(a);
+            let q = Self::parse_q_value(a);
+            Reverse((spec, q))
         });
 
         Ok(Self(media_types))
     }
 
-    fn parse_q_value(media_type: &MediaTypeBuf) -> f32 {
+    fn parse_q_value(media_type: &MediaTypeBuf) -> QValue {
         media_type
             .get_param(names::Q)
             .and_then(|v| v.as_str().parse().ok())
-            .unwrap_or(1.0)
+            .unwrap_or_default()
     }
 
     fn parse_specificity(media_type: &MediaTypeBuf) -> usize {
@@ -326,6 +326,66 @@ const fn is_ows(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum QValue {
+    #[default]
+    One,
+    Partial(u16),
+}
+
+impl FromStr for QValue {
+    type Err = HeaderError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "1"
+            || (s.starts_with("1.")
+                && (2..=5).contains(&s.len())
+                && s[2..].chars().all(|c| c == '0'))
+        {
+            Ok(QValue::One)
+        } else if s == "0" {
+            Ok(QValue::Partial(0))
+        } else if let Some(percent) = s.strip_prefix("0.") {
+            let num_digits = percent.len();
+            if (0..=3).contains(&num_digits) && percent.chars().all(|c| c.is_ascii_digit()) {
+                let mut digits = if num_digits == 0 {
+                    0u16
+                } else {
+                    percent.parse().map_err(|_| HeaderError::invalid())?
+                };
+                match num_digits {
+                    1 => digits *= 100,
+                    2 => digits *= 10,
+                    3 | 0 => (),
+                    _ => unreachable!(),
+                }
+                Ok(QValue::Partial(digits))
+            } else {
+                Err(HeaderError::invalid())
+            }
+        } else {
+            Err(HeaderError::invalid())
+        }
+    }
+}
+
+impl Ord for QValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (QValue::One, QValue::One) => Ordering::Equal,
+            (QValue::One, QValue::Partial(_)) => Ordering::Greater,
+            (QValue::Partial(_), QValue::One) => Ordering::Less,
+            (QValue::Partial(a), QValue::Partial(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for QValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 struct MediaRange<'a>(&'a MediaTypeBuf);
 
 impl PartialEq<MediaType<'_>> for MediaRange<'_> {
@@ -359,14 +419,6 @@ impl PartialEq<MediaType<'_>> for MediaRange<'_> {
 
         wildcard_type || wildcard_subtype || exact_match || params_match
     }
-}
-
-#[derive(Default)]
-struct BestMediaType<'ty> {
-    quality: f32,
-    parsed_priority: usize,
-    given_priority: usize,
-    ty: Option<&'ty MediaType<'ty>>,
 }
 
 #[cfg(test)]
@@ -752,5 +804,52 @@ mod tests {
                 MediaType::parse("image/gif").unwrap(),
             ]
         );
+    }
+
+    #[test]
+    fn test_qvalue_parsing_one() {
+        assert_eq!(QValue::One, "1".parse().unwrap());
+        assert_eq!(QValue::One, "1.".parse().unwrap());
+        assert_eq!(QValue::One, "1.0".parse().unwrap());
+        assert_eq!(QValue::One, "1.00".parse().unwrap());
+        assert_eq!(QValue::One, "1.000".parse().unwrap());
+    }
+
+    #[test]
+    fn test_qvalue_parsing_partial() {
+        assert_eq!(QValue::Partial(0), "0".parse().unwrap());
+        assert_eq!(QValue::Partial(0), "0.".parse().unwrap());
+        assert_eq!(QValue::Partial(0), "0.0".parse().unwrap());
+        assert_eq!(QValue::Partial(0), "0.00".parse().unwrap());
+        assert_eq!(QValue::Partial(0), "0.000".parse().unwrap());
+        assert_eq!(QValue::Partial(100), "0.1".parse().unwrap());
+        assert_eq!(QValue::Partial(120), "0.12".parse().unwrap());
+        assert_eq!(QValue::Partial(123), "0.123".parse().unwrap());
+        assert_eq!(QValue::Partial(23), "0.023".parse().unwrap());
+        assert_eq!(QValue::Partial(3), "0.003".parse().unwrap());
+    }
+
+    #[test]
+    fn qvalue_parsing_invalid() {
+        assert!("0.0000".parse::<QValue>().is_err());
+        assert!("0.1.".parse::<QValue>().is_err());
+        assert!("0.12.".parse::<QValue>().is_err());
+        assert!("0.123.".parse::<QValue>().is_err());
+        assert!("0.1234".parse::<QValue>().is_err());
+        assert!("1.123".parse::<QValue>().is_err());
+        assert!("1.1234".parse::<QValue>().is_err());
+        assert!("1.12345".parse::<QValue>().is_err());
+        assert!("1.0000".parse::<QValue>().is_err());
+    }
+
+    #[test]
+    fn qvalue_ordering() {
+        assert!(QValue::One > QValue::Partial(0));
+        assert!(QValue::One > QValue::Partial(100));
+        assert!(QValue::Partial(100) > QValue::Partial(0));
+        assert!(QValue::Partial(120) > QValue::Partial(100));
+        assert!(QValue::Partial(123) > QValue::Partial(120));
+        assert!(QValue::Partial(23) < QValue::Partial(100));
+        assert!(QValue::Partial(3) < QValue::Partial(23));
     }
 }
