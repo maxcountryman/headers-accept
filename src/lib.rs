@@ -313,7 +313,7 @@ impl Display for Accept {
             .map(|mt| mt.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "{}", media_types)
+        write!(f, "{media_types}")
     }
 }
 
