@@ -136,7 +136,7 @@ impl Accept {
         Available: IntoIterator<Item = &'a MediaType<'mt>>,
     {
         struct BestMediaType<'a, 'mt: 'a> {
-            quality: f32,
+            quality: QValue,
             parsed_priority: usize,
             given_priority: usize,
             media_type: &'a MediaType<'mt>,
@@ -153,7 +153,7 @@ impl Accept {
                     .find(|(_, available_range)| MediaRange(available_range) == *available_type)
                 {
                     let quality = Self::parse_q_value(matched_range.1);
-                    if quality == 0.0 {
+                    if quality.is_zero() {
                         return None;
                     }
                     Some(BestMediaType {
@@ -166,15 +166,7 @@ impl Accept {
                     None
                 }
             })
-            .max_by(|a, b| {
-                a.quality
-                    .partial_cmp(&b.quality)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| {
-                        Reverse((a.parsed_priority, a.given_priority))
-                            .cmp(&Reverse((b.parsed_priority, b.given_priority)))
-                    })
-            })
+            .max_by_key(|x| (x.quality, Reverse((x.parsed_priority, x.given_priority))))
             .map(|best| best.media_type)
     }
 
@@ -220,26 +212,20 @@ impl Accept {
         }
 
         // Sort media types relative to their specificity and `q` value.
-        media_types.sort_by(|a, b| {
-            let spec_a = Self::parse_specificity(a);
-            let spec_b = Self::parse_specificity(b);
-
-            let q_a = Self::parse_q_value(a);
-            let q_b = Self::parse_q_value(b);
-
-            spec_b
-                .cmp(&spec_a)
-                .then_with(|| q_b.partial_cmp(&q_a).unwrap_or(Ordering::Equal))
+        media_types.sort_by_key(|x| {
+            let spec = Self::parse_specificity(x);
+            let q = Self::parse_q_value(x);
+            Reverse((spec, q))
         });
 
         Ok(Self(media_types))
     }
 
-    fn parse_q_value(media_type: &MediaTypeBuf) -> f32 {
+    fn parse_q_value(media_type: &MediaTypeBuf) -> QValue {
         media_type
             .get_param(names::Q)
             .and_then(|v| v.as_str().parse().ok())
-            .unwrap_or(1.0)
+            .unwrap_or_default()
     }
 
     fn parse_specificity(media_type: &MediaTypeBuf) -> usize {
@@ -368,6 +354,75 @@ impl PartialEq<MediaType<'_>> for MediaRange<'_> {
         };
 
         wildcard_type || wildcard_subtype || exact_match || params_match
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QValue(
+    /// "Kilo"-q, quality value, in the range 0-1000.
+    u16,
+);
+
+impl Default for QValue {
+    fn default() -> Self {
+        QValue(1000)
+    }
+}
+
+impl QValue {
+    /// Returns `true` if the quality value is zero.
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl FromStr for QValue {
+    type Err = HeaderError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // cf. https://www.rfc-editor.org/rfc/rfc9110.html#quality.values
+
+        fn parse_fractional(digits: &[u8]) -> Result<u16, HeaderError> {
+            digits
+                .iter()
+                .try_fold(0u16, |acc, &c| {
+                    if c.is_ascii_digit() {
+                        Some(acc * 10 + (c - b'0') as u16)
+                    } else {
+                        None
+                    }
+                })
+                .map(|num| match digits.len() {
+                    1 => num * 100,
+                    2 => num * 10,
+                    _ => num,
+                })
+                .ok_or_else(HeaderError::invalid)
+        }
+
+        match s.as_bytes() {
+            b"0" => Ok(QValue(0)),
+            b"1" => Ok(QValue(1000)),
+            [b'1', b'.', zeros @ ..] if zeros.len() <= 3 && zeros.iter().all(|d| *d == b'0') => {
+                Ok(QValue(1000))
+            }
+            [b'0', b'.', fractional @ ..] if fractional.len() <= 3 => {
+                parse_fractional(fractional).map(QValue)
+            }
+            _ => Err(HeaderError::invalid()),
+        }
+    }
+}
+
+impl Ord for QValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl PartialOrd for QValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -764,5 +819,65 @@ mod tests {
                 MediaType::parse("image/gif").unwrap(),
             ]
         );
+    }
+
+    #[test]
+    fn test_qvalue_parsing_one() {
+        assert_eq!(QValue(1000), "1".parse().unwrap());
+        assert_eq!(QValue(1000), "1.".parse().unwrap());
+        assert_eq!(QValue(1000), "1.0".parse().unwrap());
+        assert_eq!(QValue(1000), "1.00".parse().unwrap());
+        assert_eq!(QValue(1000), "1.000".parse().unwrap());
+    }
+
+    #[test]
+    fn test_qvalue_parsing_partial() {
+        assert_eq!(QValue(0), "0".parse().unwrap());
+        assert_eq!(QValue(0), "0.".parse().unwrap());
+        assert_eq!(QValue(0), "0.0".parse().unwrap());
+        assert_eq!(QValue(0), "0.00".parse().unwrap());
+        assert_eq!(QValue(0), "0.000".parse().unwrap());
+        assert_eq!(QValue(100), "0.1".parse().unwrap());
+        assert_eq!(QValue(120), "0.12".parse().unwrap());
+        assert_eq!(QValue(123), "0.123".parse().unwrap());
+        assert_eq!(QValue(23), "0.023".parse().unwrap());
+        assert_eq!(QValue(3), "0.003".parse().unwrap());
+    }
+
+    #[test]
+    fn qvalue_parsing_invalid() {
+        assert!("0.0000".parse::<QValue>().is_err());
+        assert!("0.1.".parse::<QValue>().is_err());
+        assert!("0.12.".parse::<QValue>().is_err());
+        assert!("0.123.".parse::<QValue>().is_err());
+        assert!("0.1234".parse::<QValue>().is_err());
+        assert!("1.123".parse::<QValue>().is_err());
+        assert!("1.1234".parse::<QValue>().is_err());
+        assert!("1.12345".parse::<QValue>().is_err());
+        assert!("2.0".parse::<QValue>().is_err());
+        assert!("-0.0".parse::<QValue>().is_err());
+        assert!("1.0000".parse::<QValue>().is_err());
+    }
+
+    #[test]
+    fn qvalue_ordering() {
+        assert!(QValue(1000) > QValue(0));
+        assert!(QValue(1000) > QValue(100));
+        assert!(QValue(100) > QValue(0));
+        assert!(QValue(120) > QValue(100));
+        assert!(QValue(123) > QValue(120));
+        assert!(QValue(23) < QValue(100));
+        assert!(QValue(3) < QValue(23));
+    }
+
+    #[test]
+    fn qvalue_default() {
+        let q: QValue = Default::default();
+        assert_eq!(q, QValue(1000));
+    }
+
+    #[test]
+    fn qvalue_is_zero() {
+        assert!("0.".parse::<QValue>().unwrap().is_zero());
     }
 }
