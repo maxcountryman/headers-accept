@@ -24,7 +24,7 @@ This crate provides an implementation of `headers::Header` for `Accept`.
 
 While other crates exist, they either rely on stagnant crates like `mime` (`headers-accept` uses `mediatype` instead) or deviate from RFC 9110 (by imposing onerous sort logic) or both.
 
-This crate aims to solve these problems while adhereing to the spec outlined in [section 12.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
+This crate aims to solve these problems while adhering to the spec outlined in [section 12.5.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-12.5.1).
 
 ## 📦 Install
 
