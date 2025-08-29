@@ -259,9 +259,14 @@ impl Header for Accept {
     where
         I: Iterator<Item = &'i HeaderValue>,
     {
-        let value = values.next().ok_or_else(HeaderError::invalid)?;
-        let value_str = value.to_str().map_err(|_| HeaderError::invalid())?;
-        Self::parse(value_str)
+        let mut values_iter = values.map(|v| v.to_str().map_err(|_| HeaderError::invalid()));
+        // Expect at least one header
+        let mut value_str = String::from(values_iter.next().ok_or(HeaderError::invalid())??);
+        for v in values_iter {
+            value_str.push(',');
+            value_str.push_str(v?);
+        }
+        Self::parse(&value_str)
     }
 
     fn encode<E>(&self, values: &mut E)
