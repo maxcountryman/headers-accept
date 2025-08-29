@@ -786,6 +786,44 @@ mod tests {
     }
 
     #[test]
+    fn decode() {
+        let mut empty_iter = [].iter();
+        assert!(
+            Accept::decode(&mut empty_iter).is_err(),
+            "providing no headers results in an error"
+        );
+
+        let header_value_1 = HeaderValue::from_static("audio/*; q=0.2");
+        let header_value_2 = HeaderValue::from_static("audio/basic");
+        let header_value_combined = HeaderValue::from_static("audio/*; q=0.2, audio/basic");
+        let combined_accept_try_into: Accept = (&header_value_combined).try_into().unwrap();
+
+        // A single header should give the same result as [super::try_into]
+        let combined_accept_decode =
+            Accept::decode(&mut [&header_value_combined].into_iter()).unwrap();
+        let mut combined_iter_decode = combined_accept_decode.media_types();
+        let mut combined_iter_try_into = combined_accept_try_into.media_types();
+
+        for (m1, m2) in core::iter::zip(&mut combined_iter_decode, &mut combined_iter_try_into) {
+            assert_eq!(m1, m2, "same media type through `decode` and `try_into`");
+        }
+        assert_eq!(combined_iter_decode.next(), None);
+        assert_eq!(combined_iter_try_into.next(), None);
+
+        // Multiple headers are equivalent to a single, `,`-separated header
+        let separate_accept_decode =
+            Accept::decode(&mut [&header_value_1, &header_value_2].into_iter()).unwrap();
+        let mut separate_iter_decode = separate_accept_decode.media_types();
+        let mut separate_iter_try_into = combined_accept_try_into.media_types();
+
+        for (m1, m2) in core::iter::zip(&mut separate_iter_decode, &mut separate_iter_try_into) {
+            assert_eq!(m1, m2, "same media type through `decode` and `try_into`");
+        }
+        assert_eq!(separate_iter_decode.next(), None);
+        assert_eq!(separate_iter_try_into.next(), None);
+    }
+
+    #[test]
     fn mixed_lifetime_from_iter() {
         // this must type check
         #[allow(unused)]
