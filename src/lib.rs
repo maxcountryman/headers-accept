@@ -202,9 +202,12 @@ impl Accept {
             }
 
             // Parse the media type from the current segment.
-            match MediaTypeBuf::from_str(s[..end].trim()) {
-                Ok(mt) => media_types.push(mt),
-                Err(_) => return Err(HeaderError::invalid()),
+            let segment = s[..end].trim();
+            if !segment.is_empty() {
+                match MediaTypeBuf::from_str(segment) {
+                    Ok(mt) => media_types.push(mt),
+                    Err(_) => return Err(HeaderError::invalid()),
+                }
             }
 
             // Move past the current segment.
@@ -337,28 +340,27 @@ impl PartialEq<MediaType<'_>> for MediaRange<'_> {
             self.0.suffix() == other.suffix,
         );
 
-        let wildcard_type = self.0.ty() == names::_STAR;
-        let wildcard_subtype = self.0.subty() == names::_STAR && type_match;
-
-        let exact_match =
-            type_match && subtype_match && suffix_match && self.0.params().count() == 0;
-
-        let params_match = type_match && subtype_match && suffix_match && {
-            let self_params = self
-                .0
-                .params()
-                .filter(|&(name, _)| name != names::Q)
-                .collect::<BTreeMap<_, _>>();
-
-            let other_params = other
-                .params()
-                .filter(|&(name, _)| name != names::Q)
-                .collect::<BTreeMap<_, _>>();
-
-            self_params == other_params
+        let media_type_matches = if self.0.ty() == names::_STAR {
+            true
+        } else if self.0.subty() == names::_STAR {
+            type_match
+        } else {
+            type_match && subtype_match && suffix_match
         };
 
-        wildcard_type || wildcard_subtype || exact_match || params_match
+        if !media_type_matches {
+            return false;
+        }
+
+        let required_params = self
+            .0
+            .params()
+            .filter(|&(name, _)| name != names::Q)
+            .collect::<BTreeMap<_, _>>();
+
+        required_params
+            .into_iter()
+            .all(|(name, value)| other.get_param(name).is_some_and(|v| v == value))
     }
 }
 
@@ -821,6 +823,138 @@ mod tests {
         }
         assert_eq!(separate_iter_decode.next(), None);
         assert_eq!(separate_iter_try_into.next(), None);
+    }
+
+    #[test]
+    fn parse_ignores_empty_accept_elements() {
+        let accept = Accept::from_str(", text/html, , application/json,").unwrap();
+        let mut media_types = accept.media_types();
+
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/html").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("application/json").unwrap())
+        );
+        assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn negotiate_prefers_parameterized_range_with_extra_representation_params() {
+        let accept = Accept::from_str("text/plain;format=flowed;q=0.9, text/plain;q=0.7").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain;charset=utf-8").unwrap(),
+            MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_respects_wildcard_range_parameters() {
+        let accept = Accept::from_str("text/*;charset=utf-8;q=0.9, text/*;q=0.1").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain;charset=iso-8859-1").unwrap(),
+            MediaType::parse("text/plain;charset=utf-8").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_q_parameter_is_case_insensitive() {
+        let accept = Accept::from_str("text/html;Q=0.1, text/plain;q=0.9").unwrap();
+        let available = vec![
+            MediaType::parse("text/html").unwrap(),
+            MediaType::parse("text/plain").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_q_parameter_not_last_is_respected() {
+        let accept = Accept::from_str("text/html;q=0.1;level=1, text/plain;q=0.9").unwrap();
+        let available = vec![
+            MediaType::parse("text/html;level=1").unwrap(),
+            MediaType::parse("text/plain").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_specific_q_zero_overrides_wildcard() {
+        let accept = Accept::from_str("text/*;q=0.8, text/plain;q=0").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain").unwrap(),
+            MediaType::parse("text/html").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_specific_allow_overrides_wildcard_q_zero() {
+        let accept = Accept::from_str("text/*;q=0, text/plain;q=0.8").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain").unwrap(),
+            MediaType::parse("text/html").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[0]);
+    }
+
+    #[test]
+    fn negotiate_parameter_name_matching_is_case_insensitive() {
+        let accept = Accept::from_str("text/plain;FORMAT=flowed;q=0.9, text/plain;q=0.7").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
+            MediaType::parse("text/plain;charset=utf-8").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[0]);
+    }
+
+    #[test]
+    fn negotiate_quoted_and_unquoted_parameter_values_are_equivalent() {
+        let accept =
+            Accept::from_str("text/plain;format=\"flowed\";q=0.9, text/plain;q=0.1").unwrap();
+        let available = vec![
+            MediaType::parse("text/plain;format=flowed").unwrap(),
+            MediaType::parse("text/plain").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[0]);
+    }
+
+    #[test]
+    fn decode_ignores_empty_elements_across_merged_headers() {
+        let header_value_1 = HeaderValue::from_static("text/html,");
+        let header_value_2 = HeaderValue::from_static(",application/json");
+        let accept = Accept::decode(&mut [&header_value_1, &header_value_2].into_iter()).unwrap();
+        let mut media_types = accept.media_types();
+
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("text/html").unwrap())
+        );
+        assert_eq!(
+            media_types.next(),
+            Some(&MediaTypeBuf::from_str("application/json").unwrap())
+        );
+        assert_eq!(media_types.next(), None);
+    }
+
+    #[test]
+    fn parse_empty_accept_value_yields_empty_preference_list() {
+        let accept = Accept::from_str("").unwrap();
+        let available = vec![MediaType::parse("text/plain").unwrap()];
+
+        assert_eq!(accept.media_types().next(), None);
+        assert_eq!(accept.negotiate(&available), None);
     }
 
     #[test]
