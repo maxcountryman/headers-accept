@@ -55,13 +55,12 @@
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::BTreeMap,
     fmt::{self, Display},
     str::FromStr,
 };
 
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
-use mediatype::{names, MediaType, MediaTypeBuf, ReadParams};
+use mediatype::{names, MediaType, MediaTypeBuf, Name, Params, ReadParams, Value};
 
 /// Represents a parsed `Accept` HTTP header.
 ///
@@ -72,6 +71,14 @@ use mediatype::{names, MediaType, MediaTypeBuf, ReadParams};
 /// order in which they were originally specified.
 #[derive(Debug)]
 pub struct Accept(Vec<MediaTypeBuf>);
+
+/// Borrowed view over an `Accept` header value.
+///
+/// Unlike [`Accept`], this type does not allocate a `Vec<MediaTypeBuf>` when
+/// constructed. It keeps a reference to the original header string and parses
+/// media ranges lazily while negotiating.
+#[derive(Debug, Clone, Copy)]
+pub struct AcceptRef<'a>(&'a str);
 
 impl Accept {
     /// Creates an iterator over the `MediaTypeBuf` entries in the `Accept`
@@ -135,120 +142,64 @@ impl Accept {
     where
         Available: IntoIterator<Item = &'a MediaType<'mt>>,
     {
-        struct BestMediaType<'a, 'mt: 'a> {
-            quality: QValue,
-            parsed_priority: usize,
-            given_priority: usize,
-            media_type: &'a MediaType<'mt>,
-        }
-
-        available
-            .into_iter()
-            .enumerate()
-            .filter_map(|(given_priority, available_type)| {
-                if let Some(matched_range) = self
-                    .0
-                    .iter()
-                    .enumerate()
-                    .find(|(_, available_range)| MediaRange(available_range) == *available_type)
-                {
-                    let quality = Self::parse_q_value(matched_range.1);
-                    if quality.is_zero() {
-                        return None;
-                    }
-                    Some(BestMediaType {
-                        quality,
-                        parsed_priority: matched_range.0,
-                        given_priority,
-                        media_type: available_type,
-                    })
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|x| (x.quality, Reverse((x.parsed_priority, x.given_priority))))
-            .map(|best| best.media_type)
+        negotiate_impl(available, || self.0.iter())
     }
 
-    fn parse(mut s: &str) -> Result<Self, HeaderError> {
+    fn parse(s: &str) -> Result<Self, HeaderError> {
         let mut media_types = Vec::new();
 
-        // Parsing adapted from `mediatype::MediaTypeList`.
-        //
-        // See: https://github.com/picoHz/mediatype/blob/29921e91f7176784d4ed1fe42ca40f8a8f225941/src/media_type_list.rs#L34-L63
-        while !s.is_empty() {
-            // Skip initial whitespace.
-            if let Some(index) = s.find(|c: char| !is_ows(c)) {
-                s = &s[index..];
-            } else {
-                break;
+        for segment in MediaRangeSegments::new(s) {
+            match MediaTypeBuf::from_str(segment) {
+                Ok(mt) => media_types.push(mt),
+                Err(_) => return Err(HeaderError::invalid()),
             }
-
-            let mut end = 0;
-            let mut quoted = false;
-            let mut escaped = false;
-            for c in s.chars() {
-                if escaped {
-                    escaped = false;
-                } else {
-                    match c {
-                        '"' => quoted = !quoted,
-                        '\\' if quoted => escaped = true,
-                        ',' if !quoted => break,
-                        _ => (),
-                    }
-                }
-                end += c.len_utf8();
-            }
-
-            // Parse the media type from the current segment.
-            let segment = s[..end].trim();
-            if !segment.is_empty() {
-                match MediaTypeBuf::from_str(segment) {
-                    Ok(mt) => media_types.push(mt),
-                    Err(_) => return Err(HeaderError::invalid()),
-                }
-            }
-
-            // Move past the current segment.
-            s = s[end..].trim_start_matches(',');
         }
 
         // Sort media types relative to their specificity and `q` value.
         media_types.sort_by_key(|x| {
-            let spec = Self::parse_specificity(x);
-            let q = Self::parse_q_value(x);
+            let spec = media_range_specificity(x);
+            let q = media_range_quality(x);
             Reverse((spec, q))
         });
 
         Ok(Self(media_types))
     }
+}
 
-    fn parse_q_value(media_type: &MediaTypeBuf) -> QValue {
-        media_type
-            .get_param(names::Q)
-            .and_then(|v| v.as_str().parse().ok())
-            .unwrap_or_default()
+impl<'a> AcceptRef<'a> {
+    /// Parses a borrowed `Accept` header value.
+    ///
+    /// This validates each non-empty list element according to media type
+    /// syntax while retaining only a borrowed reference to the original value.
+    pub fn parse(value: &'a str) -> Result<Self, HeaderError> {
+        for segment in MediaRangeSegments::new(value) {
+            MediaType::parse(segment).map_err(|_| HeaderError::invalid())?;
+        }
+        Ok(Self(value))
     }
 
-    fn parse_specificity(media_type: &MediaTypeBuf) -> usize {
-        let type_specificity = if media_type.ty() != names::_STAR {
-            1
-        } else {
-            0
-        };
-        let subtype_specificity = if media_type.subty() != names::_STAR {
-            1
-        } else {
-            0
-        };
+    /// Returns the original header value.
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
 
-        let parameter_count = media_type
-            .params()
-            .filter(|&(name, _)| name != names::Q)
-            .count();
+    /// Creates an iterator over media ranges in wire order.
+    pub fn media_ranges(self) -> impl Iterator<Item = MediaType<'a>> {
+        MediaRangeSegments::new(self.0).filter_map(|segment| MediaType::parse(segment).ok())
+    }
 
-        type_specificity + subtype_specificity + parameter_count
+    /// Determine the most acceptable media type from a list of media types
+    /// available from the server.
+    pub fn negotiate<'m, 'mt: 'm, Available>(
+        self,
+        available: Available,
+    ) -> Option<&'m MediaType<'mt>>
+    where
+        Available: IntoIterator<Item = &'m MediaType<'mt>>,
+    {
+        negotiate_impl(available, || {
+            MediaRangeSegments::new(self.0).filter_map(|segment| MediaType::parse(segment).ok())
+        })
     }
 }
 
@@ -299,6 +250,23 @@ impl TryFrom<&HeaderValue> for Accept {
     }
 }
 
+impl<'a> TryFrom<&'a HeaderValue> for AcceptRef<'a> {
+    type Error = HeaderError;
+
+    fn try_from(value: &'a HeaderValue) -> Result<Self, Self::Error> {
+        let s = value.to_str().map_err(|_| HeaderError::invalid())?;
+        Self::parse(s)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for AcceptRef<'a> {
+    type Error = HeaderError;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
 impl Display for Accept {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let media_types = self
@@ -330,38 +298,256 @@ const fn is_ows(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
-struct MediaRange<'a>(&'a MediaTypeBuf);
+#[derive(Debug, Clone, Copy)]
+struct MediaRangeSegments<'a> {
+    source: &'a str,
+}
 
-impl PartialEq<MediaType<'_>> for MediaRange<'_> {
-    fn eq(&self, other: &MediaType<'_>) -> bool {
-        let (type_match, subtype_match, suffix_match) = (
-            self.0.ty() == other.ty,
-            self.0.subty() == other.subty,
-            self.0.suffix() == other.suffix,
-        );
-
-        let media_type_matches = if self.0.ty() == names::_STAR {
-            true
-        } else if self.0.subty() == names::_STAR {
-            type_match
-        } else {
-            type_match && subtype_match && suffix_match
-        };
-
-        if !media_type_matches {
-            return false;
-        }
-
-        let required_params = self
-            .0
-            .params()
-            .filter(|&(name, _)| name != names::Q)
-            .collect::<BTreeMap<_, _>>();
-
-        required_params
-            .into_iter()
-            .all(|(name, value)| other.get_param(name).is_some_and(|v| v == value))
+impl<'a> MediaRangeSegments<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source }
     }
+}
+
+impl<'a> Iterator for MediaRangeSegments<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(index) = self.source.find(|c: char| !is_ows(c)) {
+                self.source = &self.source[index..];
+            } else {
+                return None;
+            }
+
+            let mut end = 0;
+            let mut quoted = false;
+            let mut escaped = false;
+            for c in self.source.chars() {
+                if escaped {
+                    escaped = false;
+                } else {
+                    match c {
+                        '"' => quoted = !quoted,
+                        '\\' if quoted => escaped = true,
+                        ',' if !quoted => break,
+                        _ => (),
+                    }
+                }
+                end += c.len_utf8();
+            }
+
+            let segment = self.source[..end].trim();
+            self.source = self.source[end..].trim_start_matches(',');
+
+            if !segment.is_empty() {
+                return Some(segment);
+            }
+        }
+    }
+}
+
+trait MediaRangeView {
+    fn ty(&self) -> Name<'_>;
+    fn subty(&self) -> Name<'_>;
+    fn suffix(&self) -> Option<Name<'_>>;
+    fn range_params(&self) -> Params<'_>;
+    fn range_param(&self, name: Name<'_>) -> Option<Value<'_>>;
+}
+
+impl MediaRangeView for MediaTypeBuf {
+    fn ty(&self) -> Name<'_> {
+        self.ty()
+    }
+
+    fn subty(&self) -> Name<'_> {
+        self.subty()
+    }
+
+    fn suffix(&self) -> Option<Name<'_>> {
+        self.suffix()
+    }
+
+    fn range_params(&self) -> Params<'_> {
+        ReadParams::params(self)
+    }
+
+    fn range_param(&self, name: Name<'_>) -> Option<Value<'_>> {
+        ReadParams::get_param(self, name)
+    }
+}
+
+impl MediaRangeView for MediaType<'_> {
+    fn ty(&self) -> Name<'_> {
+        self.ty
+    }
+
+    fn subty(&self) -> Name<'_> {
+        self.subty
+    }
+
+    fn suffix(&self) -> Option<Name<'_>> {
+        self.suffix
+    }
+
+    fn range_params(&self) -> Params<'_> {
+        ReadParams::params(self)
+    }
+
+    fn range_param(&self, name: Name<'_>) -> Option<Value<'_>> {
+        ReadParams::get_param(self, name)
+    }
+}
+
+impl<T> MediaRangeView for &T
+where
+    T: MediaRangeView + ?Sized,
+{
+    fn ty(&self) -> Name<'_> {
+        (*self).ty()
+    }
+
+    fn subty(&self) -> Name<'_> {
+        (*self).subty()
+    }
+
+    fn suffix(&self) -> Option<Name<'_>> {
+        (*self).suffix()
+    }
+
+    fn range_params(&self) -> Params<'_> {
+        (*self).range_params()
+    }
+
+    fn range_param(&self, name: Name<'_>) -> Option<Value<'_>> {
+        (*self).range_param(name)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MatchedRange {
+    quality: QValue,
+    specificity: usize,
+    source_order: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BestNegotiatedMediaType<'a, 'mt: 'a> {
+    quality: QValue,
+    specificity: usize,
+    source_order: usize,
+    given_priority: usize,
+    media_type: &'a MediaType<'mt>,
+}
+
+fn negotiate_impl<'a, 'mt: 'a, Available, RangeFactory, RangeIter, Range>(
+    available: Available,
+    mut range_factory: RangeFactory,
+) -> Option<&'a MediaType<'mt>>
+where
+    Available: IntoIterator<Item = &'a MediaType<'mt>>,
+    RangeFactory: FnMut() -> RangeIter,
+    RangeIter: Iterator<Item = Range>,
+    Range: MediaRangeView,
+{
+    available
+        .into_iter()
+        .enumerate()
+        .filter_map(|(given_priority, available_type)| {
+            let matched_range = best_matching_range(available_type, range_factory())?;
+            if matched_range.quality.is_zero() {
+                return None;
+            }
+            Some(BestNegotiatedMediaType {
+                quality: matched_range.quality,
+                specificity: matched_range.specificity,
+                source_order: matched_range.source_order,
+                given_priority,
+                media_type: available_type,
+            })
+        })
+        .max_by_key(|best| {
+            (
+                best.quality,
+                best.specificity,
+                Reverse((best.source_order, best.given_priority)),
+            )
+        })
+        .map(|best| best.media_type)
+}
+
+fn best_matching_range<RangeIter, Range>(
+    available_type: &MediaType<'_>,
+    ranges: RangeIter,
+) -> Option<MatchedRange>
+where
+    RangeIter: Iterator<Item = Range>,
+    Range: MediaRangeView,
+{
+    ranges
+        .enumerate()
+        .filter_map(|(source_order, range)| {
+            if media_range_matches(&range, available_type) {
+                Some(MatchedRange {
+                    quality: media_range_quality(&range),
+                    specificity: media_range_specificity(&range),
+                    source_order,
+                })
+            } else {
+                None
+            }
+        })
+        .max_by_key(|matched| {
+            (
+                matched.specificity,
+                matched.quality,
+                Reverse(matched.source_order),
+            )
+        })
+}
+
+fn media_range_quality(range: &impl MediaRangeView) -> QValue {
+    range
+        .range_param(names::Q)
+        .and_then(|v| v.as_str().parse().ok())
+        .unwrap_or_default()
+}
+
+fn media_range_specificity(range: &impl MediaRangeView) -> usize {
+    let type_specificity = if range.ty() != names::_STAR { 1 } else { 0 };
+    let subtype_specificity = if range.subty() != names::_STAR { 1 } else { 0 };
+
+    let parameter_count = range
+        .range_params()
+        .filter(|&(name, _)| name != names::Q)
+        .count();
+
+    type_specificity + subtype_specificity + parameter_count
+}
+
+fn media_range_matches(range: &impl MediaRangeView, available: &MediaType<'_>) -> bool {
+    let (type_match, subtype_match, suffix_match) = (
+        range.ty() == available.ty,
+        range.subty() == available.subty,
+        range.suffix() == available.suffix,
+    );
+
+    let media_type_matches = if range.ty() == names::_STAR {
+        true
+    } else if range.subty() == names::_STAR {
+        type_match
+    } else {
+        type_match && subtype_match && suffix_match
+    };
+
+    if !media_type_matches {
+        return false;
+    }
+
+    range
+        .range_params()
+        .filter(|&(name, _)| name != names::Q)
+        .all(|(name, value)| available.get_param(name).is_some_and(|v| v == value))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -955,6 +1141,127 @@ mod tests {
 
         assert_eq!(accept.media_types().next(), None);
         assert_eq!(accept.negotiate(&available), None);
+    }
+
+    #[test]
+    fn accept_ref_parse_and_media_ranges() {
+        let accept = AcceptRef::parse(", text/html;q=0.9, , application/json,").unwrap();
+        let mut media_ranges = accept.media_ranges();
+
+        assert_eq!(
+            media_ranges.next(),
+            Some(MediaType::parse("text/html;q=0.9").unwrap())
+        );
+        assert_eq!(
+            media_ranges.next(),
+            Some(MediaType::parse("application/json").unwrap())
+        );
+        assert_eq!(media_ranges.next(), None);
+    }
+
+    #[test]
+    fn accept_ref_rejects_invalid_value() {
+        assert!(AcceptRef::parse("text/html, not-a-media-type").is_err());
+    }
+
+    #[test]
+    fn accept_ref_as_str_round_trip() {
+        let raw = "text/html;q=0.9, application/json;q=0.8";
+        let accept = AcceptRef::parse(raw).unwrap();
+
+        assert_eq!(accept.as_str(), raw);
+    }
+
+    #[test]
+    fn accept_ref_try_from_str() {
+        let accept = AcceptRef::try_from("text/plain;q=0.4").unwrap();
+        let mut media_ranges = accept.media_ranges();
+
+        assert_eq!(
+            media_ranges.next(),
+            Some(MediaType::parse("text/plain;q=0.4").unwrap())
+        );
+        assert_eq!(media_ranges.next(), None);
+        assert!(AcceptRef::try_from("text/html, not-a-media-type").is_err());
+    }
+
+    #[test]
+    fn accept_ref_media_ranges_handle_quoted_commas_and_escapes() {
+        let accept = AcceptRef::parse(
+            "text/plain;note=\"hello, world\";q=0.6, application/json;msg=\"a\\\"b\"",
+        )
+        .unwrap();
+        let mut media_ranges = accept.media_ranges();
+
+        assert_eq!(
+            media_ranges.next(),
+            Some(MediaType::parse("text/plain;note=\"hello, world\";q=0.6").unwrap())
+        );
+        assert_eq!(
+            media_ranges.next(),
+            Some(MediaType::parse("application/json;msg=\"a\\\"b\"").unwrap())
+        );
+        assert_eq!(media_ranges.next(), None);
+    }
+
+    #[test]
+    fn accept_ref_negotiate_matches_accept() {
+        let header = "text/*;q=0.3, text/plain;q=0.7, text/plain;format=flowed, */*;q=0.5";
+        let owned = Accept::from_str(header).unwrap();
+        let borrowed = AcceptRef::parse(header).unwrap();
+
+        let available = vec![
+            MediaType::parse("text/plain;charset=utf-8").unwrap(),
+            MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
+            MediaType::parse("image/png").unwrap(),
+        ];
+
+        assert_eq!(
+            borrowed.negotiate(available.iter()),
+            owned.negotiate(available.iter())
+        );
+    }
+
+    #[test]
+    fn accept_ref_try_from_header_value() {
+        let header_value = HeaderValue::from_static("audio/*; q=0.2, audio/basic");
+        let accept = AcceptRef::try_from(&header_value).unwrap();
+
+        let available = vec![
+            MediaType::parse("audio/basic").unwrap(),
+            MediaType::parse("audio/mpeg").unwrap(),
+        ];
+
+        assert_eq!(accept.negotiate(available.iter()), Some(&available[0]));
+    }
+
+    #[test]
+    fn accept_ref_negotiate_matches_accept_for_varied_inputs() {
+        let available = vec![
+            MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
+            MediaType::parse("text/plain;charset=utf-8").unwrap(),
+            MediaType::parse("text/html").unwrap(),
+            MediaType::parse("application/json").unwrap(),
+            MediaType::parse("image/png").unwrap(),
+        ];
+
+        let headers = [
+            "text/plain;format=flowed;q=0.9, text/plain;q=0.7, */*;q=0.1",
+            "text/*;charset=utf-8;q=0.9, text/*;q=0.1",
+            "text/html;Q=0.1, text/plain;q=0.9",
+            "text/plain;note=\"hello, world\";q=0.4, application/json;q=0.8",
+        ];
+
+        for header in headers {
+            let owned = Accept::from_str(header).unwrap();
+            let borrowed = AcceptRef::parse(header).unwrap();
+
+            assert_eq!(
+                borrowed.negotiate(available.iter()),
+                owned.negotiate(available.iter()),
+                "header: {header}"
+            );
+        }
     }
 
     #[test]

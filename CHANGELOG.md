@@ -9,11 +9,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Added
 
 - Added RFC 9110-focused tests for empty list elements, wildcard/parameter precedence, parameter matching behavior, and `q`-value edge cases.
+- Added `AcceptRef<'a>`, a borrowed `Accept` representation for lazy negotiation without building an owned `Vec<MediaTypeBuf>`.
 
 ### Changed
 
 - Updated `Accept` parsing to ignore empty list elements in comma-separated header lists.
 - Updated media-range matching to treat non-`q` parameters as required subset constraints for both exact and wildcard ranges.
+- Refactored shared list-segment parsing so owned and borrowed accept paths apply the same empty-element handling.
+- Refactored negotiation internals so quality/specificity parsing and range matching are shared between `Accept` and `AcceptRef`.
 
 ## [v0.3.0] - 2025-11-22
 
