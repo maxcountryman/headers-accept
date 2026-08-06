@@ -60,7 +60,7 @@ use std::{
 };
 
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
-use mediatype::{names, MediaType, MediaTypeBuf, Name, Params, ReadParams, Value};
+use mediatype::{MediaType, MediaTypeBuf, Name, Params, ReadParams, Value, names};
 
 /// Represents a parsed `Accept` HTTP header.
 ///
@@ -314,11 +314,7 @@ impl<'a> Iterator for MediaRangeSegments<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(index) = self.source.find(|c: char| !is_ows(c)) {
-                self.source = &self.source[index..];
-            } else {
-                return None;
-            }
+            self.source = &self.source[self.source.find(|c: char| !is_ows(c))?..];
 
             let mut end = 0;
             let mut quoted = false;
@@ -1210,7 +1206,7 @@ mod tests {
         let owned = Accept::from_str(header).unwrap();
         let borrowed = AcceptRef::parse(header).unwrap();
 
-        let available = vec![
+        let available = [
             MediaType::parse("text/plain;charset=utf-8").unwrap(),
             MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
             MediaType::parse("image/png").unwrap(),
@@ -1227,7 +1223,7 @@ mod tests {
         let header_value = HeaderValue::from_static("audio/*; q=0.2, audio/basic");
         let accept = AcceptRef::try_from(&header_value).unwrap();
 
-        let available = vec![
+        let available = [
             MediaType::parse("audio/basic").unwrap(),
             MediaType::parse("audio/mpeg").unwrap(),
         ];
@@ -1237,7 +1233,7 @@ mod tests {
 
     #[test]
     fn accept_ref_negotiate_matches_accept_for_varied_inputs() {
-        let available = vec![
+        let available = [
             MediaType::parse("text/plain;format=flowed;charset=utf-8").unwrap(),
             MediaType::parse("text/plain;charset=utf-8").unwrap(),
             MediaType::parse("text/html").unwrap(),
