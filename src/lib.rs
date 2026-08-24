@@ -62,6 +62,8 @@ use std::{
 use headers_core::{Error as HeaderError, Header, HeaderName, HeaderValue};
 use mediatype::{names, MediaType, MediaTypeBuf, Name, Params, ReadParams, Value};
 
+pub use mediatype;
+
 /// Represents a parsed `Accept` HTTP header.
 ///
 /// This struct holds a list of `MediaTypeBuf` which are sorted based on
