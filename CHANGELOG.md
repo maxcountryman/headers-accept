@@ -15,6 +15,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Updated `Accept` parsing to ignore empty list elements in comma-separated header lists.
 - Updated media-range matching to treat non-`q` parameters as required subset constraints for both exact and wildcard ranges.
+- Updated media-range matching to compare `charset` parameter values case-insensitively, per RFC 9110 section 8.3.2.
 - Refactored shared list-segment parsing so owned and borrowed accept paths apply the same empty-element handling.
 - Refactored negotiation internals so quality/specificity parsing and range matching are shared between `Accept` and `AcceptRef`.
 

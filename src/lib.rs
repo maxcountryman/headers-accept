@@ -547,7 +547,15 @@ fn media_range_matches(range: &impl MediaRangeView, available: &MediaType<'_>) -
     range
         .range_params()
         .filter(|&(name, _)| name != names::Q)
-        .all(|(name, value)| available.get_param(name).is_some_and(|v| v == value))
+        .all(|(name, value)| {
+            available.get_param(name).is_some_and(|v| {
+                if name == names::CHARSET {
+                    v.unquoted_str().eq_ignore_ascii_case(&value.unquoted_str())
+                } else {
+                    v == value
+                }
+            })
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1047,6 +1055,14 @@ mod tests {
         ];
 
         assert_eq!(accept.negotiate(&available).unwrap(), &available[1]);
+    }
+
+    #[test]
+    fn negotiate_charset_value_is_case_insensitive() {
+        let accept = Accept::from_str("text/plain;charset=utf-8").unwrap();
+        let available = vec![MediaType::parse("text/plain;charset=UTF-8").unwrap()];
+
+        assert_eq!(accept.negotiate(&available).unwrap(), &available[0]);
     }
 
     #[test]
